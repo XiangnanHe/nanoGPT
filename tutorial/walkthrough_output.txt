@@ -1,0 +1,116 @@
+
+==============================================================================
+STEP 1  Text -> token ids (char-level here; GPT-2 uses BPE with vocab 50257->padded 50304)
+==============================================================================
+vocab: [' ', ',', 'T', 'b', 'e', 'n', 'o', 'r', 't']
+ids  : [2, 6, 0, 3, 4, 1, 0, 6, 7, 0, 5, 6, 8, 0, 8, 6, 0, 3, 4]
+Training pairs (input -> target = next char). One sequence of length T gives T examples at once:
+   after 'T'          predict 'o'
+   after 'To'         predict ' '
+   after 'To '        predict 'b'
+   after 'To b'       predict 'e'
+   after 'To be'      predict ','
+
+==============================================================================
+STEP 2  Embeddings: token embedding (wte) + learned position embedding (wpe)
+==============================================================================
+number of parameters: 0.00M
+idx (1, 8) -> tok_emb (1, 8, 8) + pos_emb (8, 8) (broadcast over batch)
+The char ' ' occurs at t=[2, 6]. Same wte row, different wpe rows:
+   tok_emb equal  : True
+   pos_emb equal  : False   -> after adding, the model can tell the two spaces apart
+x[0,0] = tok+pos = tensor([ 0.044,  0.001, -0.042,  0.012, -0.012,  0.042,  0.033,  0.056], grad_fn=<SelectBackward0>)
+
+==============================================================================
+STEP 3  LayerNorm: re-centre and re-scale each token vector (keeps activations stable)
+==============================================================================
+before: mean 3.86 std 2.92   (per-token)
+after : mean 0.00 std 1.00
+nanoGPT uses PRE-norm: x = x + attn(ln(x)). The residual path itself is never normalised, so gradients flow straight through.
+
+==============================================================================
+STEP 4  Causal self-attention computed BY HAND (T=4 tokens, C=8, 2 heads) and checked against model.py
+==============================================================================
+c_attn out split ->  q,k,v each (1, 4, 8)
+after view+transpose each is (B, n_head, T, head_size) = (1, 2, 4, 4)
+
+raw scores head0 (row = query position, col = key position):
+ tensor([[ 0.080, -0.175,  0.578, -0.636],
+        [ 0.102,  0.133,  0.358, -0.807],
+        [-0.163,  0.323, -0.410,  0.118],
+        [-0.064, -0.042,  0.523, -0.452]], grad_fn=<SelectBackward0>)
+
+after causal mask (-inf = cannot look at the future):
+ tensor([[ 0.080,   -inf,   -inf,   -inf],
+        [ 0.102,  0.133,   -inf,   -inf],
+        [-0.163,  0.323, -0.410,   -inf],
+        [-0.064, -0.042,  0.523, -0.452]], grad_fn=<SelectBackward0>)
+
+attention weights head0 (each row sums to 1; row t only mixes tokens <= t):
+ tensor([[1.000, 0.000, 0.000, 0.000],
+        [0.492, 0.508, 0.000, 0.000],
+        [0.293, 0.477, 0.229, 0.000],
+        [0.222, 0.227, 0.400, 0.151]], grad_fn=<SelectBackward0>)
+row sums: tensor([1., 1., 1., 1.], grad_fn=<SumBackward1>)
+
+max |hand - CausalSelfAttention| = 2.9802322387695312e-08   <- identical
+Why /sqrt(head_size)? q.k has variance ~hs, so without scaling softmax saturates (see experiment no_attn_scale).
+   std of q.k for hs=64: 8.05 (unscaled)   1.01 (scaled by 1/sqrt(64))
+
+==============================================================================
+STEP 5  Proof of causality: changing a FUTURE token must not change earlier outputs
+==============================================================================
+number of parameters: 0.00M
+|delta logits| per position after editing token t=5: tensor([0.000, 0.000, 0.000, 0.000, 0.000, 0.483, 0.011, 0.007], grad_fn=<SelectBackward0>)
+=> positions 0..4 unchanged (0.000), positions 5..7 change. This is why one pass trains on T next-token tasks safely.
+
+==============================================================================
+STEP 6  MLP (4x expand, GELU, project back) and the Block (two residual updates)
+==============================================================================
+c_fc (32, 8)  c_proj (8, 32)  (8 -> 32 -> 8)
+Attention = tokens TALK to each other (mix across T). MLP = each token THINKS alone (mix across C). ~2/3 of params are MLP.
+Block keeps shape (1, 8, 8) ; Block(x)-x is the "update" written into the residual stream:
+   |x| = 8.33   |block(x)-x| = 2.36
+
+==============================================================================
+STEP 7  Whole GPT at the real "baby" size used in our experiments (6 layers, 6 heads, 384 dim, ctx 256, vocab 84)
+==============================================================================
+number of parameters: 10.68M
+  wte (tied with lm_head)            32,256    0.3%
+  wpe                                98,304    0.9%
+  attention (all layers)          3,548,160   32.9%
+  mlp (all layers)                7,089,408   65.8%
+  layernorms                          9,984    0.1%
+  TOTAL                          10,778,112
+
+loss at init = 4.521  vs  ln(vocab)=ln(84)=4.431  (uniform guess). Small init (std 0.02) => near-uniform logits.
+Weight tying saves 32,256 params here, but for GPT-2 (50304x768) it saves 38.6M of 124M (31%).
+
+==============================================================================
+STEP 8  Scaled init of residual projections: std 0.02/sqrt(2*n_layer)
+==============================================================================
+Each block ADDS two things into the residual stream, so variance grows ~ 2*n_layer. Scaling the writers keeps it ~constant.
+number of parameters: 10.68M
+  n_layer= 6 scaled_init=True   residual-stream std after last block = 0.1436
+number of parameters: 10.68M
+  n_layer= 6 scaled_init=False  residual-stream std after last block = 0.4906
+number of parameters: 42.62M
+  n_layer=24 scaled_init=True   residual-stream std after last block = 0.1411
+number of parameters: 42.62M
+  n_layer=24 scaled_init=False  residual-stream std after last block = 1.0358
+
+==============================================================================
+STEP 9  configure_optimizers: weight decay only on matrices (>=2D); not on biases / LayerNorm gains
+==============================================================================
+num decayed parameter tensors: 26, with 10,747,392 parameters
+num non-decayed parameter tensors: 50, with 30,720 parameters
+using fused AdamW: False
+
+==============================================================================
+STEP 10  Sampling: temperature and top-k acting on one logit vector
+==============================================================================
+  temperature 0.5: probs = tensor([    0.865,     0.117,     0.016,     0.002,     0.000])
+  temperature 1.0: probs = tensor([0.636, 0.234, 0.086, 0.032, 0.012])
+  temperature 2.0: probs = tensor([0.429, 0.260, 0.158, 0.096, 0.058])
+  top_k=2 (T=1): probs = tensor([0.731, 0.269, 0.000, 0.000, 0.000])   <- tail tokens can never be sampled
+generate() is autoregressive: crop to block_size, forward, take LAST position logits, sample, append, repeat.
