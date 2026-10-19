@@ -11,6 +11,11 @@ at default flags (same 10,679,808 params, same loss to 1e-6 — `check_equivalen
 | `run_experiment.py`, `run_all.sh` | trainer + the 40 experiments (≈1 min each) |
 | `bench_speed.py` | flash-attention / bf16 / `torch.compile` speed tests |
 | `make_report.py` → `plots/`, `results_table.md`, `results/*.json` | plots, full table, raw logs |
+| **`nanogpt_tutorial.ipynb`** | **interactive notebook: explore + 8 build-it-yourself exercises with auto-checks** (Part 3) |
+| `nanogpt_tutorial_solutions.ipynb` | same notebook with every exercise solved (executed, all checks ✅) |
+| **`dashboard.py`** | **Streamlit dashboard** (Part 3) |
+| `lab.py`, `nbhelpers.py`, `build_notebook.py` | shared helpers / autograder / generator of the two notebooks |
+| `setup_lab.sh`, `start_lab.sh`, `requirements_lab.txt` | environment + launcher |
 
 Reproduce: `python ../data/shakespeare_plays/prepare.py <dir with *_gut.txt>` → `python walkthrough.py` → `bash run_all.sh` → `python bench_speed.py` → `python make_report.py`.
 
@@ -181,6 +186,52 @@ Rule of thumb: use dropout only when you will see the data many times (small dat
 
 Fused vs manual attention at the same tokens/iter: T=256: 16.8 vs 28.0 ms; T=1024: 18.1 vs 56.1 ms (6.1 GB); T=2048: **20.1 vs 99.3 ms, 1.7 GB vs 10.7 GB**.
 Manual attention costs O(T²) memory and time; the fused (flash) kernel's memory is flat in T. The "manual" rows use `attn_scale=False` as the switch to my manual path (same compute and memory pattern). These are single-measurement timings (30 steps after 5 warm-up).
+
+---
+# Part 3 — Notebook and dashboard: learn it by doing
+
+```bash
+bash setup_lab.sh        # once: isolated venv with jupyterlab + streamlit (re-uses the existing torch)
+bash start_lab.sh        # JupyterLab on $JUPYTER_PORT (8888), dashboard on $TENSORBOARD_PORT (8501)
+# on Bolt: bolt task viewport <task_id> JUPYTER_PORT   (and TENSORBOARD_PORT for the dashboard)
+```
+The first notebook run builds the dataset and trains the reference model (≈95 s on the A100) if `tutorial/checkpoints/ckpt_base.pt` does not exist.
+
+## `nanogpt_tutorial.ipynb` — the path to writing `model.py` yourself
+Follows `model.py` bottom-up. Every section has *Explore* cells (real numbers, sliders), a *Your turn* stub, and a check cell that loads the **real `model.py` weights into your module** and compares outputs.
+
+| # | Section | You write | The check verifies |
+|---|---|---|---|
+| 1 | Data, targets, ln(V) | – | – |
+| 2 | Embeddings | – | – |
+| 3 | LayerNorm | `MyLayerNorm` (no `F.layer_norm`) | equals `model.LayerNorm`, both bias settings |
+| 4 | Attention (heatmap explorer, √d demo) | `MyCausalSelfAttention` (manual) | equals `model.py` **and** future tokens never change earlier outputs |
+| 5 | MLP | `MyMLP` | equals `model.MLP` |
+| 6 | Block / residual stream | `MyBlock` | equals `model.Block` |
+| 7 | GPT, tying, scaled init, param calculator | `MyGPT` | logits + loss equal `model.GPT`; weight tying; `c_proj` std = 0.02/√(2L); zero biases; loss ≈ ln V |
+| 8 | Optimiser groups, LR schedule | `my_configure_optimizers`, `get_lr` | ≥2-D decay split; warm-up / cosine endpoints and monotonicity |
+| 9 | Sampling (temperature / top-k widgets) | `my_generate` | same samples as `model.generate` for the same seed (incl. context cropping) |
+| 10 | Experiments: browse the 40 saved runs, **run your own live (≈10 s)**, questions to answer | – | – |
+| 11 | Capstone: train your `MyGPT` and compare with `model.GPT` | – | – |
+| 12 | Next steps: RoPE, RMSNorm, SwiGLU, GQA, KV-cache | – | – |
+
+**Verification of the exercises:** with the reference solutions all 9 checks pass (`nanogpt_tutorial_solutions.ipynb` is saved with its outputs). I also *mutation-tested* the checks: 9 plausible bugs (no causal mask, missing √d scale,
+post-norm block, no weight tying, unscaled init, decaying every parameter, off-by-one warm-up, ignoring top-k, unbiased variance in LayerNorm) are each caught by the corresponding check.
+Run `python build_notebook.py` to regenerate both notebooks after editing the exercises.
+
+## `dashboard.py` — Streamlit, 7 tabs
+| tab | what you can do |
+|---|---|
+| 📖 model.py map | pick a component, see its source lines next to a short explanation + the ablation number |
+| 📊 Experiments | 12 presets (components, depth, heads, context, dropout/overfitting, LR, warm-up, leakage...), overlay any runs, train/val, table with Δ vs baseline |
+| 🔍 Attention lab | type text; one head / all heads of a layer / mean per layer as heatmaps; next-character probabilities |
+| ✍️ Generate | prompt, temperature, top-k, length, seed; logit playground |
+| 🧪 Live training lab | tick/untick techniques, change size and optimiser, press ▶ — trains on the GPU and streams the loss; runs accumulate for comparison |
+| 🧮 Size calculator | parameters/compute/memory by component; presets from our baby GPT to GPT-2 XL (124.48M for GPT-2 small) |
+| ⚡ Speed | the A100 benchmark table and charts |
+
+Smoke-tested with Streamlit's `AppTest` (all tabs render without exceptions), plus a real server start and a real live-training launch with the dashboard's exact arguments.
+Untested: the browser UI itself (I could not open a browser here) — in particular widget look-and-feel and the ▶ Run button's streaming display.
 
 ---
 # Summary — what each technique is for

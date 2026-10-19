@@ -11,7 +11,7 @@ from ablation_model import GPT, Cfg
 HERE = os.path.dirname(os.path.abspath(__file__))
 name = sys.argv[1]
 hp = dict(iters=2000, batch_size=64, lr=1e-3, min_lr=1e-4, warmup=100, wd=0.1, beta2=0.99, eval_every=100, eval_iters=50,
-          seed=1337, schedule='cosine', dataset='shakespeare_plays', sample=False)
+          seed=1337, schedule='cosine', dataset='shakespeare_plays', sample=False, save=False)
 cfg_kw = {}
 for a in sys.argv[2:]:
     k, v = a.split('=')
@@ -74,6 +74,9 @@ if hp['sample']:
     model.eval(); itos = meta['itos']
     out = model.generate(torch.tensor([[meta['stoi']['\n']]], device=dev), 400, top_k=40)[0].tolist()
     log['sample'] = ''.join(itos[i] for i in out)
+if hp['save']:
+    os.makedirs(os.path.join(HERE, 'checkpoints'), exist_ok=True)
+    torch.save({'model': model.state_dict(), 'cfg': cfg.__dict__, 'itos': meta['itos'], 'stoi': meta['stoi']}, os.path.join(HERE, 'checkpoints', f'{name}.pt'))
 os.makedirs(os.path.join(HERE, 'results'), exist_ok=True)
 json.dump(log, open(os.path.join(HERE, 'results', f'{name}.json'), 'w'))
 print(f"[{name}] DONE final val {log['final_val']:.4f} best {log['best_val']:.4f} time {log['time_s']:.0f}s")

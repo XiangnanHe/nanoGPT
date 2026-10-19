@@ -1,7 +1,7 @@
 # Branch `shawn`: nanoGPT `model.py` tutorial + experiments
 
 See **[tutorial/README.md](tutorial/README.md)**: a step-by-step walkthrough of `model.py` with runnable examples (`tutorial/walkthrough.py`),
-and 40 ablation/scaling/optimisation experiments run on an A100 showing what each technique contributes to train/val loss.
+40 ablation/scaling/optimisation experiments run on an A100 showing what each technique contributes to train/val loss, an **interactive notebook with build-it-yourself exercises** (`tutorial/nanogpt_tutorial.ipynb`) and a **Streamlit dashboard** (`tutorial/dashboard.py`). Start both with `bash tutorial/start_lab.sh`.
 
 ---
 
